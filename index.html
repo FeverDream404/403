@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Three.js 3D - 连续方块 & 完整透视线</title>
+  <title>Three.js 3D - 连续方块 & 完整透视线（相机内部线段可见）</title>
 
   <!-- three.js, OrbitControls -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -53,8 +53,6 @@
 </head>
 <body>
 <div id="controls">
-  <!-- 去掉了旋转功能，仅保留按钮 -->
-  <!-- 竖向排列，并使用中文文字 -->
   <button id="addCubeBtn">添加一个方块(贴在后面)</button>
   <button id="toggleLinesBtn">显示透视线</button>
   <button id="removeCubeBtn">移除一个方块</button>
@@ -71,32 +69,33 @@
 /////////////////////////////////////////////////////////////
 
 const threeCanvas = document.getElementById('threeCanvas');
+// 使用抗锯齿
 const renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 
-// 创建一个场景，并设置背景色为白
+// 场景
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xffffff);
 
-// 创建一个透视相机
+// 相机
 const camera = new THREE.PerspectiveCamera(
-  70,                         // 视场角
+  70,                           // 视场角
   window.innerWidth / window.innerHeight, // 宽高比
-  0.1,                        // 最近面
-  1000                        // 最远面
+  0.1,                          // 最近面
+  1000                          // 最远面
 );
-camera.position.set(0, 2, 6); // 放置相机
+camera.position.set(0, 2, 6);
 
-// 允许鼠标控制相机旋转、缩放等
+// OrbitControls 允许鼠标旋转/缩放/平移相机
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
 
-// 创建一个 1x1x1 的线框立方体作为初始方块
+// 第一个 1x1x1 立方体（线框）
 const edgesGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1));
 const edgesMat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
 const baseCube = new THREE.LineSegments(edgesGeo, edgesMat);
 scene.add(baseCube);
 
-// 方块列表（包含第一个立方体）
+// 用列表记录所有方块
 const cubesList = [ baseCube ];
 
 ////////////////////////////////////////////////////
@@ -120,12 +119,12 @@ const ctx2D = overlay2D.getContext('2d');
 overlay2D.width = window.innerWidth;
 overlay2D.height = window.innerHeight;
 
-// 清空画布
+// 清空 2D 画布
 function clear2D(){
   ctx2D.clearRect(0, 0, overlay2D.width, overlay2D.height);
 }
 
-// 将 3D 坐标转换到 2D 屏幕坐标
+// 将 3D 坐标投影到 2D 屏幕坐标
 function projectTo2D(vec3){
   const p = vec3.clone();
   p.project(camera);
@@ -134,7 +133,7 @@ function projectTo2D(vec3){
   return new THREE.Vector2(x, y);
 }
 
-// 绘制 2D 线段
+// 在 2D 上画线
 function drawLine2D(a2, b2, color="black", lineWidth=1){
   ctx2D.beginPath();
   ctx2D.moveTo(a2.x, a2.y);
@@ -144,7 +143,7 @@ function drawLine2D(a2, b2, color="black", lineWidth=1){
   ctx2D.stroke();
 }
 
-// 绘制 2D 圆点
+// 在 2D 上画圆点
 function drawCircle2D(pos, radius=3, color="red"){
   ctx2D.beginPath();
   ctx2D.fillStyle = color;
@@ -152,7 +151,7 @@ function drawCircle2D(pos, radius=3, color="red"){
   ctx2D.fill();
 }
 
-// 计算线段交点（2D）
+// 线段与线段求交点（在 2D 上使用）
 function intersect2D(line1, line2){
   const [A,B] = line1;
   const [C,D] = line2;
@@ -164,10 +163,11 @@ function intersect2D(line1, line2){
   return new THREE.Vector2(x,y);
 }
 
-// 将线段裁剪到屏幕可见范围
+// 将线段裁剪到屏幕可见区域
 function clipLineToScreen(a2, b2, w, h){
   let points = [ { x:a2.x, y:a2.y, t:0 }, { x:b2.x, y:b2.y, t:1 }];
 
+  // 辅助函数：与某个边界相交
   function intersectBoundary(px,py, rx,ry, side){
     let t = null;
     if(side==='left'){
@@ -201,6 +201,7 @@ function clipLineToScreen(a2, b2, w, h){
     }
   }
 
+  // 只保留 t 在 [0,1] 范围内
   let inside = candidates.filter(o=> o.t>=0 && o.t<=1);
   inside.sort((a,b)=> a.t - b.t);
   if(inside.length<2) return null;
@@ -212,7 +213,82 @@ function clipLineToScreen(a2, b2, w, h){
 }
 
 ////////////////////////////////////////////////////////////
-// 5) 定义 1x1x1 立方体的 8 个顶点及边信息
+// 4) 在 3D 中做 near-plane 裁剪，防止相机在内部时出现无限线
+////////////////////////////////////////////////////////////
+
+// 将点从世界坐标转到相机坐标
+function worldToCameraSpace(worldPos, cam){
+  const invMat = new THREE.Matrix4();
+  invMat.copy(cam.matrixWorldInverse);
+  return worldPos.clone().applyMatrix4(invMat);
+}
+
+// 在相机空间对线(A->B)做 near-plane 裁剪
+// near-plane 通常 z = -cam.near
+// 若整条线都在平面后方，则返回 null
+// 若部分在线后方/前方，则只保留在近裁剪面之后的那部分
+function clipLineByNearPlane(Aworld, Bworld, cam){
+  // 转到相机坐标
+  const Acam = worldToCameraSpace(Aworld, cam);
+  const Bcam = worldToCameraSpace(Bworld, cam);
+
+  // near-plane = z = -cam.near
+  const zPlane = -cam.near;
+
+  // 如果两个点都在 near plane 前面(z > -near, 意味相机后方)，则无可见线
+  if(Acam.z > zPlane && Bcam.z > zPlane){
+    return null;
+  }
+
+  // 如果两点都在 plane 内部(z <= -near)，则整条线保留
+  if(Acam.z <= zPlane && Bcam.z <= zPlane){
+    // 返回原世界坐标即可
+    return [ Aworld.clone(), Bworld.clone() ];
+  }
+
+  // 部分在前，部分在后 => 计算与 near-plane 的交点
+  function intersectZplane(aC, bC, planeZ){
+    // param t: aC.z + t*(bC.z-aC.z) = planeZ
+    // => t = (planeZ - aC.z) / (bC.z - aC.z)
+    const t = (planeZ - aC.z) / (bC.z - aC.z);
+    return t;
+  }
+
+  // A->B 线 param: P(t)= A + t*(B-A), t in [0,1]
+  let Akeep = Acam.z <= zPlane; // A 是否保留
+
+  // 计算交点
+  const tIntersect = intersectZplane(Acam, Bcam, zPlane);
+
+  if(tIntersect < 0 || tIntersect > 1){
+    // 不在[0,1]，说明无可见部分
+    return null;
+  }
+
+  // 计算交点相机坐标
+  const intersectCam = new THREE.Vector3(
+    Acam.x + tIntersect*(Bcam.x - Acam.x),
+    Acam.y + tIntersect*(Bcam.y - Acam.y),
+    Acam.z + tIntersect*(Bcam.z - Acam.z)
+  );
+
+  // 再转回世界坐标
+  const intersectWorld = intersectCam.clone();
+  intersectWorld.applyMatrix4(camera.matrixWorld);
+
+  // 如果 A 在后方(>zPlane)，则截取 B-> intersect
+  // 如果 B 在后方(>zPlane)，则截取 A-> intersect
+  if(Akeep){
+    // 保留 A, 截取到交点
+    return [ Aworld.clone(), intersectWorld ];
+  } else {
+    // 保留 B, 截取到交点
+    return [ Bworld.clone(), intersectWorld ];
+  }
+}
+
+////////////////////////////////////////////////////////////
+// 5) 定义顶点、消失点并绘制透视线
 ////////////////////////////////////////////////////////////
 
 const localVerts = [
@@ -225,21 +301,17 @@ const localVerts = [
   new THREE.Vector3( 0.5,  0.5,  0.5),
   new THREE.Vector3(-0.5,  0.5,  0.5)
 ];
-
-// x, y, z 方向对应的边索引
 const xEdgesIndex = [[0,1],[3,2],[4,5],[7,6]];
 const yEdgesIndex = [[0,3],[1,2],[4,7],[5,6]];
 const zEdgesIndex = [[0,4],[1,5],[2,6],[3,7]];
 
-////////////////////////////////////////////////////////////
-// 6) 获取消失点并将立方体边连接到该消失点
-////////////////////////////////////////////////////////////
-
+// 计算消失点(2D)，只用第一个方块
 function getVanishingPoint(edgesIndex){
   if(cubesList.length===0) return null;
   const firstCube = cubesList[0];
   firstCube.updateMatrixWorld(true);
 
+  // 收集边的 2D 投影
   let lines2D = [];
   for(const [s,e] of edgesIndex){
     const sWorld = localVerts[s].clone().applyMatrix4(firstCube.matrixWorld);
@@ -249,6 +321,7 @@ function getVanishingPoint(edgesIndex){
     lines2D.push([s2,e2]);
   }
 
+  // 两条线的交点即消失点
   let vp = null;
   outer: for(let i=0; i<lines2D.length; i++){
     for(let j=i+1; j<lines2D.length; j++){
@@ -262,42 +335,68 @@ function getVanishingPoint(edgesIndex){
   return vp;
 }
 
-// 将每条边的两端点连到对应的消失点
-function drawEdgesToVanishingPoint(edgesIndex, vanishPt, color){
-  if(!vanishPt || cubesList.length===0) return;
+// 在 3D 空间对 vertex-> vanishPt 做 near-plane 裁剪，再投影
+function drawVertexToVanish(vertexWorld, vanish2D, color){
+  // vanish2D 并无 3D 坐标，这里假设线只需裁剪近端
+
+  // 如果相机内：先把 vertex-> vanish 当作 vertex->(一个很远的点)
+  // 这里无法确切知道 vanishPt 的 3D 位置(它在无穷远)
+  // 所以我们只做 vertex-> near-plane 的裁剪
+
+  // 如果 vertex 在相机后面 => 整条线无效
+  // 否则我们把 vertex-> near-plane 结果保留
+
+  // 先检查 vertex 是否在相机前方
+  const vertexCam = worldToCameraSpace(vertexWorld, camera);
+  const zPlane = -camera.near;
+  if(vertexCam.z > zPlane){
+    // 顶点在 near plane 前方 => 不可见
+    return; // 不画
+  }
+
+  // 已通过 => 投影到 2D
+  const vertex2D = projectTo2D(vertexWorld);
+
+  // vertex2D-> vanish2D 并在屏幕可见范围内
+  const clipped = clipLineToScreen(vertex2D, vanish2D, overlay2D.width, overlay2D.height);
+  if(clipped){
+    drawLine2D(clipped[0], clipped[1], color);
+  }
+}
+
+// 将立方体中每条边的两个顶点，各自连到 vanishPt
+function drawEdgesToVanishingPoint(edgesIndex, vanish2D, color){
+  if(!vanish2D || cubesList.length===0) return;
+
   const firstCube = cubesList[0];
   firstCube.updateMatrixWorld(true);
 
   for(const [s,e] of edgesIndex){
+    // 对边的两个端点 => vanish2D
     const sWorld = localVerts[s].clone().applyMatrix4(firstCube.matrixWorld);
     const eWorld = localVerts[e].clone().applyMatrix4(firstCube.matrixWorld);
-    const s2 = projectTo2D(sWorld);
-    const e2 = projectTo2D(eWorld);
-    // 把边的两端分别连到 vanishPt
-    const line1 = clipLineToScreen(s2, vanishPt, overlay2D.width, overlay2D.height);
-    if(line1) drawLine2D(line1[0], line1[1], color);
 
-    const line2 = clipLineToScreen(e2, vanishPt, overlay2D.width, overlay2D.height);
-    if(line2) drawLine2D(line2[0], line2[1], color);
+    drawVertexToVanish(sWorld, vanish2D, color);
+    drawVertexToVanish(eWorld, vanish2D, color);
   }
 }
 
-////////////////////////////////////////////////////////////
-// 7) 绘制消失点与完整透视线
-////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////
+// 6) 绘制所有消失线与消失点
+////////////////////////////////////////////////////////
 
 let showPerspectiveLines = false;
-
 function drawVanishingLines(){
   clear2D();
   if(!showPerspectiveLines) return;
   if(cubesList.length===0) return;
 
+  // 获取 x, y, z 消失点(2D)
   const vpX = getVanishingPoint(xEdgesIndex);
   const vpY = getVanishingPoint(yEdgesIndex);
   const vpZ = getVanishingPoint(zEdgesIndex);
 
-  // 把 x, y, z 方向的边连到对应消失点
+  // 画 xEdges-> vpX (红), yEdges-> vpY(绿), zEdges-> vpZ(蓝)
   drawEdgesToVanishingPoint(xEdgesIndex, vpX, 'red');
   drawEdgesToVanishingPoint(yEdgesIndex, vpY, 'green');
   drawEdgesToVanishingPoint(zEdgesIndex, vpZ, 'blue');
@@ -307,15 +406,17 @@ function drawVanishingLines(){
   if(vpY) drawCircle2D(vpY,3,"green");
   if(vpZ) drawCircle2D(vpZ,3,"blue");
 
-  // 地平线：连 x, y 两个消失点
+  // 地平线 x,y
   if(vpX && vpY){
     const clipped = clipLineToScreen(vpX, vpY, overlay2D.width, overlay2D.height);
-    if(clipped) drawLine2D(clipped[0], clipped[1], "orange", 2);
+    if(clipped){
+      drawLine2D(clipped[0], clipped[1], 'orange', 2);
+    }
   }
 }
 
 ////////////////////////////////////////////////////////////////////
-// 8) 添加方块、显示透视线、移除方块
+// 7) 添加方块/显示透视线/移除方块
 ////////////////////////////////////////////////////////////////////
 
 function onAddCube(){
@@ -330,16 +431,15 @@ function onAddCube(){
   newCube.rotation.copy(lastCube.rotation);
   newCube.scale.copy(lastCube.scale);
 
-  // 在本地坐标系中 (0,0,-1) 放置 => 贴在后方
+  // 在本地坐标系中 (0,0,-1) 放置 => 贴在后面
   const localOffset = new THREE.Vector3(0,0,-1);
   localOffset.applyQuaternion(lastCube.quaternion);
 
   newCube.position.copy(lastCube.position).add(localOffset);
-
   scene.add(newCube);
   cubesList.push(newCube);
 
-  console.log("已添加一个新方块。当前数量：", cubesList.length);
+  console.log("已添加一个新方块，当前数量：", cubesList.length);
 }
 document.getElementById('addCubeBtn').addEventListener('click', onAddCube);
 
@@ -366,14 +466,14 @@ function onRemoveCube(){
 document.getElementById('removeCubeBtn').addEventListener('click', onRemoveCube);
 
 ////////////////////////////////////////////////////////
-// 9) 主循环
+// 8) 主循环
 ////////////////////////////////////////////////////////
 
 function animate(){
   requestAnimationFrame(animate);
   controls.update();
 
-  // 渲染 3D 场景
+  // 渲染三维场景
   renderer.render(scene, camera);
 
   // 在 2D 叠加层上绘制透视线
@@ -382,7 +482,7 @@ function animate(){
 animate();
 
 ////////////////////////////////////////////
-// 10) 测试案例 / 调试信息
+// 9) 简单测试信息 / 调试
 ////////////////////////////////////////////
 
 console.log("localVerts[0] =", localVerts[0]);
