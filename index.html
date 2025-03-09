@@ -1,12 +1,412 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Website</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Three.js 3D - 连续方块 & 完整透视线</title>
+
+  <!-- three.js, OrbitControls -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three/examples/js/controls/OrbitControls.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: #ccc;
+    }
+    canvas {
+      display: block;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #threeCanvas {
+      z-index: 1; /* 3D 场景在下层 */
+    }
+    #overlay2D {
+      z-index: 2; /* 2D 叠加层在上层，用于画线与点 */
+      pointer-events: none; /* 鼠标事件穿透，以便 OrbitControls 可用 */
+    }
+    #controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 999;
+      background: rgba(255, 255, 255, 0.8);
+      padding: 10px;
+      border-radius: 5px;
+      /* 按钮竖向排列 */
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    button {
+      cursor: pointer;
+    }
+  </style>
 </head>
 <body>
-    <h1>Hello, this is a test page!</h1>
-    <p>Try modifying and refreshing.</p>
+<div id="controls">
+  <p>本示例可以在 3D 空间连续添加方块，并显示完整透视线。</p>
+  <p>旋转第一个方块：</p>
+  <label>旋转 X：<input type="range" id="rotX" min="-180" max="180" step="1" value="0"/></label>
+  <label>旋转 Y：<input type="range" id="rotY" min="-180" max="180" step="1" value="0"/></label>
+  <label>旋转 Z：<input type="range" id="rotZ" min="-180" max="180" step="1" value="0"/></label>
+
+  <button id="addCubeBtn">添加一个方块(贴在后面)</button>
+  <button id="toggleLinesBtn">显示透视线</button>
+  <button id="removeCubeBtn">移除一个方块</button>
+</div>
+
+<!-- 三维场景画布 -->
+<canvas id="threeCanvas"></canvas>
+<!-- 2D 叠加层，用于绘制透视线和消失点 -->
+<canvas id="overlay2D"></canvas>
+
+<script>
+/////////////////////////////////////////////////////////////
+// 1) 基础场景、相机、OrbitControls，以及第一个方块
+/////////////////////////////////////////////////////////////
+
+const threeCanvas = document.getElementById('threeCanvas');
+const renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xffffff);
+
+const camera = new THREE.PerspectiveCamera(
+  70,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1000
+);
+camera.position.set(0, 2, 6);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+// 第一个方块（线框）
+const edgesGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1));
+const edgesMat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+const baseCube = new THREE.LineSegments(edgesGeo, edgesMat);
+scene.add(baseCube);
+
+// 方块列表（包含第一个）
+const cubesList = [ baseCube ];
+
+/////////////////////
+// 2) 旋转滑杆
+/////////////////////
+
+document.getElementById('rotX').addEventListener('input', e => {
+  baseCube.rotation.x = parseFloat(e.target.value) * Math.PI/180;
+});
+document.getElementById('rotY').addEventListener('input', e => {
+  baseCube.rotation.y = parseFloat(e.target.value) * Math.PI/180;
+});
+document.getElementById('rotZ').addEventListener('input', e => {
+  baseCube.rotation.z = parseFloat(e.target.value) * Math.PI/180;
+});
+
+/////////////////////////////
+// 3) 处理窗口大小变化
+/////////////////////////////
+
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  overlay2D.width = window.innerWidth;
+  overlay2D.height = window.innerHeight;
+});
+
+/////////////////////////////////////////////////
+// 4) 2D 叠加层 & 工具函数
+/////////////////////////////////////////////////
+
+const overlay2D = document.getElementById('overlay2D');
+const ctx2D = overlay2D.getContext('2d');
+overlay2D.width = window.innerWidth;
+overlay2D.height = window.innerHeight;
+
+// 清空 2D 画布
+function clear2D(){
+  ctx2D.clearRect(0, 0, overlay2D.width, overlay2D.height);
+}
+
+// 将 3D 坐标投影到 2D 屏幕
+function projectTo2D(vec3){
+  const p = vec3.clone();
+  p.project(camera);
+  const x = (p.x * 0.5 + 0.5) * overlay2D.width;
+  const y = (-p.y * 0.5 + 0.5) * overlay2D.height;
+  return new THREE.Vector2(x, y);
+}
+
+// 画 2D 线
+function drawLine2D(a2, b2, color="black", lineWidth=1){
+  ctx2D.beginPath();
+  ctx2D.moveTo(a2.x, a2.y);
+  ctx2D.lineTo(b2.x, b2.y);
+  ctx2D.strokeStyle = color;
+  ctx2D.lineWidth = lineWidth;
+  ctx2D.stroke();
+}
+
+// 画 2D 圆点
+function drawCircle2D(pos, radius=3, color="red"){
+  ctx2D.beginPath();
+  ctx2D.fillStyle = color;
+  ctx2D.arc(pos.x, pos.y, radius, 0, Math.PI*2);
+  ctx2D.fill();
+}
+
+// 计算两条线段在 2D 的交点
+function intersect2D(line1, line2){
+  const [A,B] = line1;
+  const [C,D] = line2;
+  const denom = (A.x - B.x)*(C.y - D.y) - (A.y - B.y)*(C.x - D.x);
+  if(Math.abs(denom) < 1e-10) return null;
+
+  const x = ((A.x*B.y - A.y*B.x)*(C.x - D.x) - (A.x - B.x)*(C.x*D.y - C.y*D.x)) / denom;
+  const y = ((A.x*B.y - A.y*B.x)*(C.y - D.y) - (A.y - B.y)*(C.x*D.y - C.y*D.x)) / denom;
+  return new THREE.Vector2(x,y);
+}
+
+// 裁剪线段使其在屏幕可见范围内
+function clipLineToScreen(a2, b2, w, h){
+  let points = [ { x:a2.x, y:a2.y, t:0 }, { x:b2.x, y:b2.y, t:1 }];
+
+  function intersectBoundary(px,py, rx,ry, side){
+    let t = null;
+    if(side==='left'){
+      if(Math.abs(rx)<1e-10) return null;
+      t = (0 - px)/rx;
+    } else if(side==='right'){
+      if(Math.abs(rx)<1e-10) return null;
+      t = (w - px)/rx;
+    } else if(side==='top'){
+      if(Math.abs(ry)<1e-10) return null;
+      t = (0 - py)/ry;
+    } else if(side==='bottom'){
+      if(Math.abs(ry)<1e-10) return null;
+      t = (h - py)/ry;
+    }
+    if(t===null) return null;
+    if(t<0||t>1) return null;
+    return t;
+  }
+
+  let rx = b2.x - a2.x;
+  let ry = b2.y - a2.y;
+  let candidates = [...points];
+
+  for(const side of ['left','right','top','bottom']){
+    let tVal = intersectBoundary(a2.x,a2.y, rx,ry, side);
+    if(tVal!==null){
+      let ix = a2.x + tVal*rx;
+      let iy = a2.y + tVal*ry;
+      candidates.push({ x:ix, y:iy, t:tVal });
+    }
+  }
+
+  let inside = candidates.filter(o=> o.t>=0 && o.t<=1);
+  inside.sort((a,b)=> a.t - b.t);
+  if(inside.length<2) return null;
+
+  const pA= inside[0];
+  const pB= inside[inside.length-1];
+
+  return [ new THREE.Vector2(pA.x, pA.y), new THREE.Vector2(pB.x, pB.y) ];
+}
+
+////////////////////////////////////////////////////////////////////////
+// 5) 定义 localVerts：1x1x1 立方体的 8 个顶点
+////////////////////////////////////////////////////////////////////////
+
+const localVerts = [
+  new THREE.Vector3(-0.5, -0.5, -0.5), //0
+  new THREE.Vector3( 0.5, -0.5, -0.5), //1
+  new THREE.Vector3( 0.5, -0.5,  0.5), //2
+  new THREE.Vector3(-0.5, -0.5,  0.5), //3
+  new THREE.Vector3(-0.5,  0.5, -0.5), //4
+  new THREE.Vector3( 0.5,  0.5, -0.5), //5
+  new THREE.Vector3( 0.5,  0.5,  0.5), //6
+  new THREE.Vector3(-0.5,  0.5,  0.5)  //7
+];
+
+// 用于绘制透视线（每组边 => 消失点）
+const xEdgesIndex = [[0,1],[3,2],[4,5],[7,6]];
+const yEdgesIndex = [[0,3],[1,2],[4,7],[5,6]];
+const zEdgesIndex = [[0,4],[1,5],[2,6],[3,7]];
+
+////////////////////////////////////////////////////////////////////////
+// 6) 获取消失点 + 将边连接到消失点
+////////////////////////////////////////////////////////////////////////
+
+function getVanishingPoint(edgesIndex){
+  if(cubesList.length===0) return null;
+  const firstCube = cubesList[0];
+  firstCube.updateMatrixWorld(true);
+
+  let lines2D = [];
+  for(const [s,e] of edgesIndex){
+    const sWorld = localVerts[s].clone().applyMatrix4(firstCube.matrixWorld);
+    const eWorld = localVerts[e].clone().applyMatrix4(firstCube.matrixWorld);
+    const s2 = projectTo2D(sWorld);
+    const e2 = projectTo2D(eWorld);
+    lines2D.push([s2,e2]);
+  }
+
+  let vp = null;
+  outer: for(let i=0; i<lines2D.length; i++){
+    for(let j=i+1; j<lines2D.length; j++){
+      const p = intersect2D(lines2D[i], lines2D[j]);
+      if(p){
+        vp = p;
+        break outer;
+      }
+    }
+  }
+  return vp;
+}
+
+// 将立方体的每条边连接到指定消失点
+function drawEdgesToVanishingPoint(edgesIndex, vanishPt, color){
+  if(!vanishPt || cubesList.length===0) return;
+  const firstCube = cubesList[0];
+  firstCube.updateMatrixWorld(true);
+
+  for(const [s,e] of edgesIndex){
+    const sWorld = localVerts[s].clone().applyMatrix4(firstCube.matrixWorld);
+    const eWorld = localVerts[e].clone().applyMatrix4(firstCube.matrixWorld);
+    const s2 = projectTo2D(sWorld);
+    const e2 = projectTo2D(eWorld);
+    // s2-> vanishPt
+    const line1 = clipLineToScreen(s2, vanishPt, overlay2D.width, overlay2D.height);
+    if(line1) drawLine2D(line1[0], line1[1], color);
+
+    // e2-> vanishPt
+    const line2 = clipLineToScreen(e2, vanishPt, overlay2D.width, overlay2D.height);
+    if(line2) drawLine2D(line2[0], line2[1], color);
+  }
+}
+
+///////////////////////////////////////////////////////
+// 7) 绘制消失点与完整透视线
+///////////////////////////////////////////////////////
+
+let showPerspectiveLines = false; // 由按钮控制
+
+function drawVanishingLines(){
+  clear2D();
+  if(!showPerspectiveLines) return;
+
+  if(cubesList.length===0) return;
+
+  // 分别获取 x, y, z 三方向消失点
+  const vpX = getVanishingPoint(xEdgesIndex);
+  const vpY = getVanishingPoint(yEdgesIndex);
+  const vpZ = getVanishingPoint(zEdgesIndex);
+
+  // 1) 将所有与 x, y, z 方向平行的边连接到对应消失点
+  drawEdgesToVanishingPoint(xEdgesIndex, vpX, 'red');
+  drawEdgesToVanishingPoint(yEdgesIndex, vpY, 'green');
+  drawEdgesToVanishingPoint(zEdgesIndex, vpZ, 'blue');
+
+  // 2) 在消失点处画小圆点
+  if(vpX) drawCircle2D(vpX,3,"red");
+  if(vpY) drawCircle2D(vpY,3,"green");
+  if(vpZ) drawCircle2D(vpZ,3,"blue");
+
+  // 3) 画地平线（x, y 两个消失点之间）
+  if(vpX && vpY){
+    const clipped = clipLineToScreen(vpX, vpY, overlay2D.width, overlay2D.height);
+    if(clipped) drawLine2D(clipped[0], clipped[1], "orange", 2);
+  }
+}
+
+////////////////////////////////////////////////////////////////////
+// 8) 添加一个方块：紧贴在最后一个方块后方
+////////////////////////////////////////////////////////////////////
+
+function onAddCube(){
+  const lastCube = cubesList[cubesList.length -1];
+
+  // 克隆几何 & 材质
+  const newGeo = edgesGeo.clone();
+  const newMat = edgesMat.clone();
+  const newCube = new THREE.LineSegments(newGeo, newMat);
+
+  // 同步旋转与缩放
+  newCube.rotation.copy(lastCube.rotation);
+  newCube.scale.copy(lastCube.scale);
+
+  // 在本地坐标系下 (0,0,-1)
+  const localOffset = new THREE.Vector3(0,0,-1);
+  localOffset.applyQuaternion(lastCube.quaternion);
+
+  newCube.position.copy(lastCube.position).add(localOffset);
+
+  scene.add(newCube);
+  cubesList.push(newCube);
+
+  console.log("已添加一个新方块。当前数量：", cubesList.length);
+}
+
+document.getElementById('addCubeBtn').addEventListener('click', onAddCube);
+
+// 切换是否显示透视线
+function onToggleLines(){
+  showPerspectiveLines = !showPerspectiveLines;
+  const btn = document.getElementById('toggleLinesBtn');
+  if(showPerspectiveLines){
+    btn.textContent = "隐藏透视线";
+  } else {
+    btn.textContent = "显示透视线";
+  }
+}
+document.getElementById('toggleLinesBtn').addEventListener('click', onToggleLines);
+
+// 移除最后一个方块（保留第一个）
+function onRemoveCube(){
+  if(cubesList.length > 1){
+    const removedCube = cubesList.pop();
+    scene.remove(removedCube);
+    console.log("已移除一个方块，当前数量：", cubesList.length);
+  } else {
+    console.log("无法移除第一个方块");
+  }
+}
+document.getElementById('removeCubeBtn').addEventListener('click', onRemoveCube);
+
+////////////////////////////////////////////////////////
+// 9) 主循环
+////////////////////////////////////////////////////////
+
+function animate(){
+  requestAnimationFrame(animate);
+  controls.update();
+
+  // 渲染 3D 场景
+  renderer.render(scene, camera);
+
+  // 在 2D 叠加层上绘制透视线
+  drawVanishingLines();
+}
+animate();
+
+////////////////////////////////////////////
+// 10) 测试案例 / 调试信息
+////////////////////////////////////////////
+
+console.log("localVerts[0] =", localVerts[0]);
+console.log("localVerts[7] =", localVerts[7]);
+
+</script>
 </body>
 </html>
